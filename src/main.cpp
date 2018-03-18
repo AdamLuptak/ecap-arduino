@@ -6,22 +6,40 @@
  created 8 Feb 2018
  by Adam Luptak
  modified 8 Apr 2018
+
++----------------------------------+------+------------------------+----------+----------------+--+
+|              range               |  kp  |           ki           |    kd    | minOutput[ms]  |  |
++----------------------------------+------+------------------------+----------+----------------+--+
+| 0-149                            | 2.4  | 4                      |        0 |              0 |  |
+| 150-200                          | 2.4  | 6                      |        0 |            100 |  |
+| 200-250                          | 2.4  | 6                      |        0 |            200 |  |
+| 250-300                          | 15   | 30                     |        0 |            300 |  |
+| 330-350                          | 15   | 300                    |        0 |            350 |  |
++----------------------------------+------+------------------------+----------+----------------+--+
+
  */
+
+#include <Controllino.h>
 #include <SPI.h>
 #include <Ethernet.h>
 #include <Timer.h>
 #include <ArduinoJson.h>
 #include <PID_v1.h>
 #include <avr/wdt.h>
+#include <Wire.h>
+#include <Adafruit_ADS1015.h>
 
 #define RELAY_PIN 13
-int outputs[] = {13, 21, 20, 19};
+int outputs[] = {13, 20, 21, 22};
 
 // Pid setup
-double kp = 2, ki = 5, kd = 1;
+double kp = 2.4, ki = 2, kd = 0;
 double setPoint, Input, Output;
 PID pid(&Input, &Output, &setPoint, kp, ki, kd, DIRECT);
 boolean isPidActive = false;
+boolean isPidInAutomaticMode = false;
+double minOutput = 0;
+double predictTemperature = 0;
 
 enum Actuator {
     RELAY,
@@ -31,7 +49,7 @@ enum Actuator {
 Actuator actuator = HW_TIMMER;
 
 // HW timer actuator
-long maxPowerInterval = 400;
+long maxPowerInterval = 1000;
 int volatile power = 1;
 int volatile timeCounter = 0;
 
@@ -48,8 +66,7 @@ IPAddress ip(192, 168, 1, 177);
 EthernetServer server(80);
 
 const char indexHtml[] PROGMEM = {
-        "<!DOCTYPE html><html><head><link rel=\"icon\" href=\"data:,\"><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><style type=\"text/css\">body{text-align:center;opacity:0;font-size:calc(.75em + 1vmin)}@media screen and (max-width:800px){button,input{padding:15px 32px}}.control,button,input{margin:0 0 20px 0}</style></head><body><div class=\"square\"><div class=\"content\"><div><h1 id=\"header\">ECAP Temperature Controller</h1><h3 id=\"controller-state\">#</h3><h3 id=\"tk3\">#</h3><h3 id=\"tk2\">#</h3><h2 id=\"tk1\">#</h2><h2 id=\"set-point\">#</h2></div><div id=\"control\"><form onsubmit=\"changeSetPoint();return false;\"><input type=\"text\" id=\"set-point-input\" value=\"Change Setpoint\" pattern=\"[0-9]|[1-8][0-9]|9[0-9]|[1-4][0-9]{2}|500\" title=\"Only numbers <0,500>\"><br><input type=\"submit\" value=\"Change SetPoint\"></form><button id=\"startButton\" onclick=\"toggleRegulator(true)\">Start regulator</button> <button id=\"stopButton\" onclick=\"toggleRegulator(false)\">Stop regulator</button><br><button onclick=\"saveDataToExcel()\">Save to excel</button><br><input type=\"checkbox\" id=\"save-to-excel-after-close\" checked=\"checked\">Save to excel after close<br><div id=\"pid-setup\"><form onsubmit=\"changePid(event);return false;\"><label id=\"kp\">kp: #</label><span><input name=\"kp\" id=\"kp\" type=\"text\" value=\"new kp\" pattern=\"\\d.{0,1}\\d{0,1}\" title=\"only numbers\"></span><br><label id=\"ki\">ki: #</label><span><input name=\"ki\" id=\"ki\" type=\"text\" value=\"new ki\" pattern=\"\\d.{0,1}\\d{0,1}\" title=\"only numbers\"></span><br><label id=\"kd\">kd: #</label><span><input name=\"kd\" id=\"kd\" type=\"text\" value=\"new kd\" pattern=\"\\d.{0,1}\\d{0,1}\" title=\"only numbers\"></span><br><input type=\"submit\" value=\"Change Pid\"></form></div></div></div></div><script type=\"text/javascript\">\"use strict\";var CONTROLLER_BASE_URL=\"http://192.168.1.177\",CONTROLLER_URL=CONTROLLER_BASE_URL+\"/controller-data\",PID_URL=CONTROLLER_BASE_URL+\"/pid\",SET_POINT_URL=CONTROLLER_BASE_URL+\"/pid/set-point\",ACTIVATE_URL=CONTROLLER_BASE_URL+\"/pid/activate\",FETCH_CONTROLLER_DATA_INTREVAL=1e3,temperatures=[],HEADER=\"tk1,tk2,tk3\\n\",TEMPERATURES_KEY=\"temperatures\",LOCAL_STORAGE_LIMIT=2e5;function changeSetPoint(){console.log(\"Start Ecap Controller\");var e=new XMLHttpRequest,t=document.getElementById(\"set-point-input\").value;e.open(\"POST\",SET_POINT_URL+\"?setPoint=\"+t),e.setRequestHeader(\"Content-Type\",\"application/json\"),e.onload=function(){200===e.status?console.log(\"Set point udpated\"):200!==e.status&&console.log(\"An error occurred during the transaction POST new setPoint\")},e.send()}function changePid(e){var t=\"?\";t=(t=(t=t+\"kp=\"+e.currentTarget[0].value+\"&\")+\"ki=\"+e.currentTarget[1].value+\"&\")+\"kd=\"+e.currentTarget[2].value;var n=new XMLHttpRequest;n.open(\"POST\",PID_URL+t),n.setRequestHeader(\"Content-Type\",\"application/json\"),n.onload=function(){200===n.status?console.log(\"Pid change\"):200!==n.status&&console.log(\"An error occurred during the transaction POST new setPoint\")},n.send()}function saveDataToExcel(){console.log(\"Saving data to excel\");var e=window.document.createElement(\"a\"),t=JSON.parse(localStorage.getItem(TEMPERATURES_KEY));t=HEADER+t.join(\"\\n\");var n=new Blob([t],{type:\"text/csv\"});e.href=window.URL.createObjectURL(n),e.download=\"measurement.csv\",document.body.appendChild(e),e.click()}function confirmExit(){document.getElementById(\"save-to-excel-after-close\").checked&&saveDataToExcel()}function fetchControllerData(){console.log(\"Fetching data from: \"+CONTROLLER_URL);var e=new XMLHttpRequest;e.onload=function(e){var t=e.target.response;updateHtmlData(t),saveData(t)},e.onerror=function(){document.getElementById(\"header\").innerHTML=\"An error occurred during the transaction<br>GET:\"+CONTROLLER_URL},e.open(\"GET\",CONTROLLER_URL,!0),e.setRequestHeader(\"Accept\",\"application/json\"),e.responseType=\"json\",e.send()}function saveData(e){for(var t=e.temperatures,n=\"\",o=0;o<t.length;o++)n=n.concat(t[o].value),o<t.length-1&&(n=n.concat(\",\"));temperatures.push(n),upsertDataLocalStorage(n)}function toggleRegulator(e){console.log(e),e&&localStorage.removeItem(TEMPERATURES_KEY);var t=new XMLHttpRequest;t.open(\"POST\",ACTIVATE_URL+\"?activate=\"+e),t.onload=function(){200===t.status?console.log(\"Regulator state change to: \"+e):200!==t.status&&console.log(\"An error occurred during the transaction POST new setPoint\")},t.send(JSON.stringify({activate:e}))}function upsertDataLocalStorage(e){if(TEMPERATURES_KEY in localStorage){var t=localStorage.getItem(TEMPERATURES_KEY),n=JSON.parse(t);n.length>=LOCAL_STORAGE_LIMIT&&(localStorage.removeItem(TEMPERATURES_KEY),n=[]),n.push(e),localStorage.setItem(TEMPERATURES_KEY,JSON.stringify(n))}else{var o=Array(1).fill(e);localStorage.setItem(TEMPERATURES_KEY,JSON.stringify(o))}}function updateHtmlData(e){e.pid.activate?(document.getElementById(\"startButton\").style.display=\"none\",document.getElementById(\"stopButton\").style.display=\"inline\"):(document.getElementById(\"stopButton\").style.display=\"none\",document.getElementById(\"startButton\").style.display=\"inline\"),document.getElementById(\"controller-state\").innerHTML=\" STATE: \"+(e.pid.activate?\"ON\":\"OFF\"),document.getElementById(\"header\").innerHTML=\"ECAP Temperature Controller\",document.getElementById(\"set-point\").innerHTML=\"Setpoint: \"+e.pid.setPoint+\"°C\",document.getElementById(\"kp\").innerHTML=\"kp: \"+e.pid.kp,document.getElementById(\"ki\").innerHTML=\"ki: \"+e.pid.ki,document.getElementById(\"kd\").innerHTML=\"kd: \"+e.pid.kd;for(var t=e.temperatures,n=0;n<t.length;n++){var o=t[n];document.getElementById(o.name).innerHTML=o.name+\": \"+o.value+\"°C\"}}window.onload=function(){setTimeout(function(){document.body.style.opacity=\"100\"},1e3)},window.onbeforeunload=confirmExit;var fetchControllerDataTimer=setInterval(fetchControllerData,FETCH_CONTROLLER_DATA_INTREVAL);</script></body></html>"};
-
+        "<!DOCTYPE html><html><head><link rel=\"icon\" href=\"data:,\"><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><style type=\"text/css\">body{text-align:center;opacity:0;font-size:calc(.75em + 1vmin)}@media screen and (max-width:800px){button,input{padding:15px 32px}}@media only screen and (min-device-width:768px) and (max-device-width:1024px){button,input{padding:15px 32px}}.control,button,input{margin:0 0 20px 0}</style></head><body><div class=\"square\"><div class=\"content\"><div><h1 id=\"header\">ECAP Temperature Controller</h1><h3 id=\"controller-state\">#</h3><h3 id=\"tk3\">#</h3><h3 id=\"tk2\">#</h3><h2 id=\"tk1\">#</h2><h2 id=\"set-point\">#</h2></div><div id=\"control\"><form onsubmit=\"changeSetPoint();return false;\"><input type=\"text\" id=\"set-point-input\" value=\"Change Setpoint\" pattern=\"[0-9]|[1-8][0-9]|9[0-9]|[1-4][0-9]{2}|400\" title=\"Only numbers <0,400>\"><br><input type=\"submit\" value=\"Change SetPoint\"></form><button id=\"startButton\" onclick=\"toggleRegulator(true)\">Start regulator</button> <button id=\"stopButton\" onclick=\"toggleRegulator(false)\">Stop regulator</button><br><button onclick=\"saveDataToExcel()\">Save to excel</button><br><input type=\"checkbox\" id=\"save-to-excel-after-close\" checked=\"checked\">Save to excel after close<br><div id=\"pid-setup\"><form onsubmit=\"changePid(event);return false;\"><label id=\"kp\">kp: #</label><span><input name=\"kp\" id=\"kp\" type=\"text\" value=\"new kp\" pattern=\"^\\d*\\.?\\d*$\" title=\"only numbers\"></span><br><label id=\"ki\">ki: #</label><span><input name=\"ki\" id=\"ki\" type=\"text\" value=\"new ki\" pattern=\"^\\d*\\.?\\d*$\" title=\"only numbers\"></span><br><label id=\"kd\">kd: #</label><span><input name=\"kd\" id=\"kd\" type=\"text\" value=\"new kd\" pattern=\"^\\d*\\.?\\d*$\" title=\"only numbers\"></span><br><input type=\"submit\" value=\"Change Pid\"></form></div></div></div></div><script type=\"text/javascript\">\"use strict\";var CONTROLLER_BASE_URL=\"http://192.168.1.177\",CONTROLLER_URL=CONTROLLER_BASE_URL+\"/controller-data\",PID_URL=CONTROLLER_BASE_URL+\"/pid\",SET_POINT_URL=CONTROLLER_BASE_URL+\"/pid/set-point\",ACTIVATE_URL=CONTROLLER_BASE_URL+\"/pid/activate\",FETCH_CONTROLLER_DATA_INTREVAL=1e3,temperatures=[],HEADER=\"tk1,tk2,tk3\\n\",TEMPERATURES_KEY=\"temperatures\",LOCAL_STORAGE_LIMIT=2e5,MAX_ALLOW_TEMPERATURE=500;function changeSetPoint(){console.log(\"Start Ecap Controller\");var e=new XMLHttpRequest,t=document.getElementById(\"set-point-input\").value;e.open(\"POST\",SET_POINT_URL+\"?setPoint=\"+t),e.setRequestHeader(\"Content-Type\",\"application/json\"),e.onload=function(){200===e.status?console.log(\"Set point udpated\"):200!==e.status&&console.log(\"An error occurred during the transaction POST new setPoint\")},e.send()}function changePid(e){var t=\"?\";t=(t=(t=t+\"kp=\"+e.currentTarget[0].value+\"&\")+\"ki=\"+e.currentTarget[1].value+\"&\")+\"kd=\"+e.currentTarget[2].value;var n=new XMLHttpRequest;n.open(\"POST\",PID_URL+t),n.setRequestHeader(\"Content-Type\",\"application/json\"),n.onload=function(){200===n.status?console.log(\"Pid change\"):200!==n.status&&console.log(\"An error occurred during the transaction POST new setPoint\")},n.send()}function saveDataToExcel(){console.log(\"Saving data to excel\");var e=window.document.createElement(\"a\"),t=JSON.parse(localStorage.getItem(TEMPERATURES_KEY));t=HEADER+t.join(\"\\n\");var n=new Blob([t],{type:\"application/csv\"});e.href=window.URL.createObjectURL(n),e.download=\"measurement.csv\",document.body.appendChild(e),e.click()}function confirmExit(){document.getElementById(\"save-to-excel-after-close\").checked&&saveDataToExcel()}function fetchControllerData(){console.log(\"Fetching data from: \"+CONTROLLER_URL);var e=new XMLHttpRequest;e.onload=function(e){var t=e.target.response;updateHtmlData(t),saveData(t)},e.onerror=function(){document.getElementById(\"header\").innerHTML=\"An error occurred during the transaction<br>GET:\"+CONTROLLER_URL},e.open(\"GET\",CONTROLLER_URL,!0),e.setRequestHeader(\"Accept\",\"application/json\"),e.responseType=\"json\",e.send()}function saveData(e){for(var t=e.temperatures,n=\"\",o=0;o<t.length;o++)n=n.concat(t[o].value),o<t.length-1&&(n=n.concat(\",\"));temperatures.push(n),upsertDataLocalStorage(n)}function toggleRegulator(e){console.log(e),e&&localStorage.removeItem(TEMPERATURES_KEY);var t=new XMLHttpRequest;t.open(\"POST\",ACTIVATE_URL+\"?activate=\"+e),t.onload=function(){200===t.status?console.log(\"Regulator state change to: \"+e):200!==t.status&&console.log(\"An error occurred during the transaction POST new setPoint\")},t.send(JSON.stringify({activate:e}))}function upsertDataLocalStorage(e){if(TEMPERATURES_KEY in localStorage){var t=localStorage.getItem(TEMPERATURES_KEY),n=JSON.parse(t);n.length>=LOCAL_STORAGE_LIMIT&&(localStorage.removeItem(TEMPERATURES_KEY),n=[]),n.push(e),localStorage.setItem(TEMPERATURES_KEY,JSON.stringify(n))}else{var o=Array(1).fill(e);localStorage.setItem(TEMPERATURES_KEY,JSON.stringify(o))}}function updateHtmlData(e){e.pid.activate?(document.getElementById(\"startButton\").style.display=\"none\",document.getElementById(\"stopButton\").style.display=\"inline\"):(document.getElementById(\"stopButton\").style.display=\"none\",document.getElementById(\"startButton\").style.display=\"inline\"),document.getElementById(\"controller-state\").innerHTML=\" STATE: \"+(e.pid.activate?\"ON\":\"OFF\"),document.getElementById(\"header\").innerHTML=\"ECAP Temperature Controller\",document.getElementById(\"set-point\").innerHTML=\"Setpoint: \"+e.pid.setPoint+\"°C\",document.getElementById(\"kp\").innerHTML=\"kp: \"+e.pid.kp,document.getElementById(\"ki\").innerHTML=\"ki: \"+e.pid.ki,document.getElementById(\"kd\").innerHTML=\"kd: \"+e.pid.kd;for(var t=e.temperatures,n={},o=0;o<t.length;o++){var a=t[o],r=document.getElementById(\"header\");a.value>MAX_ALLOW_TEMPERATURE&&(n=a),document.getElementById(a.name).innerHTML=a.name+\": \"+a.value+\"°C\"}null!=n.name?(document.getElementById(\"control\").style.display=\"none\",r.style.color=\"red\",r.innerHTML=\"SYSTEM IS IN DANGER STATE </br>TEMPERATURE \"+n.name+\" is: \"+n.value+\"°C </br>MAX ALLOW TEMPERATURE IS: \"+MAX_ALLOW_TEMPERATURE+\" °C\"):\"red\"===r.style.color&&(document.getElementById(\"control\").style.display=\"inline\",r.style.color=\"black\")}window.onload=function(){setTimeout(function(){document.body.style.opacity=\"100\"},1e3)},window.onbeforeunload=confirmExit;var fetchControllerDataTimer=setInterval(fetchControllerData,FETCH_CONTROLLER_DATA_INTREVAL);</script></body></html>"};
 const char indexPath[] = "/ ";
 const char controllerDataPath[] = "/controller-data";
 const char pidPath[] = "/pid";
@@ -57,18 +74,32 @@ const char pidSetPointPath[] = "/pid/set-point";
 const char pidActivatePath[] = "/pid/activate";
 
 static const int REQUEST_LIMIT = 100;
-const int CONTROLLER_ACTION_INTERVAL = 1000;
+static const int SECURITY_PROTECTION_INTERVAL = 15000;
+int protectionCounter = 0;
+int prevProtectionCounter = 0;
+const int MEASURING_TEMPERATURE_INTERVAL = 1000;
+static const int PROTECTION_COUNTER_MAX = 10;
+static const int TK_1_PIN = 0;
+static const int TK_2_PIN = 1;
+static const int TK_3_PIN = 2;
+
 char request[REQUEST_LIMIT];
 
 // Serial setup
 String requestFromClient = "";
 boolean isRequestCompleted = false;
 
+Adafruit_ADS1115 ads(0x48);
 double tk1;
+double tk1Predict;
 double tk2;
 double tk3;
 
+int MAX_TEMEPRATURE = 400;
+
+Timer protectionTimer;
 Timer measurmentTimer;
+double prediction;
 
 void setupEthernet();
 
@@ -108,6 +139,24 @@ void handleRelayOutput();
 
 void turnOffController();
 
+void printWithTab(double d);
+
+double readTemperatureADS1115(const int externalModulAnalogPin);
+
+void setupADS1115();
+
+void adaptPidParamters();
+
+void computePrediction();
+
+void controllProcess();
+
+void analyzeProcess();
+
+double readTemperatureADS1115Samo(const int pin);
+
+void setupMinOutput();
+
 void setupOutputs(int action) {
     for (int i = 0; i < sizeof(outputs) / sizeof(int *); ++i) {
         switch (action) {
@@ -143,9 +192,9 @@ void setupHwTimer() {// initialize Timer1
 
 ISR(TIMER1_COMPA_vect) {
     if (power > 0 && timeCounter <= power && actuator == HW_TIMMER) {
-        setupOutputs(HIGH);
+        PORTD = PORTD | B01110000;
     } else if (actuator == HW_TIMMER) {
-        setupOutputs(LOW);
+        PORTD = PORTD & B10001111;
     }
     timeCounter = timeCounter == maxPowerInterval ? 0 : timeCounter + 1;
 }
@@ -154,20 +203,83 @@ void setupPid() {
     windowStartTime = millis();
     setPoint = 0;
     pid.SetOutputLimits(0, WindowSize);
+    pid.SetSampleTime(maxPowerInterval);
     pid.SetMode(AUTOMATIC);
 }
 
-void measureTemperatures() {
-    tk1 = analogRead(0);
-    tk2 = 200.10;
-    tk3 = 300.025;
+void securityEvaluation() {
 
-//    Serial.print("tk1: ");
-//    Serial.println(tk1);
-//    Serial.print("tk2: ");
-//    Serial.println(tk2);
-//    Serial.print("tk3: ");
-//    Serial.println(tk3);
+    if (protectionCounter > prevProtectionCounter) {
+        Serial.println("CLIENT IS CONNECTED OK");
+        prevProtectionCounter = protectionCounter;
+        isClientOnline = true;
+    } else {
+        Serial.println("STOP EVERYTHING No client is connected for 15 seconds");
+        isClientOnline = false;
+    }
+
+    if (protectionCounter > PROTECTION_COUNTER_MAX) {
+        prevProtectionCounter = 0;
+        protectionCounter = 0;
+    }
+}
+
+float readTemperatureSamoNMLSG(uint8_t analogPin) {
+    float voltageCoeficient = (float) 12.0 / (float) 1023.0;
+    float voltage = analogRead(analogPin) * voltageCoeficient * 1.260;
+    voltage = voltage - 2.06;
+    return voltage / 0.0156;
+}
+
+int predictionCounter = 0;
+
+void measureTemperatures() {
+    StaticJsonBuffer<80> jsonBuffer;
+    JsonObject &root = jsonBuffer.createObject();
+    JsonArray &temperaturesArray = root.createNestedArray("tempratures");
+    tk1 = readTemperatureADS1115(TK_1_PIN);
+    tk2 = readTemperatureADS1115(TK_2_PIN);
+    tk3 = readTemperatureADS1115Samo(TK_3_PIN);
+    temperaturesArray.add(tk1);
+    temperaturesArray.add(tk2);
+    temperaturesArray.add(tk3);
+    root.printTo(Serial);
+    Serial.println();
+    Serial.print(pid.GetKp());
+    Serial.print(",");
+    Serial.print(pid.GetKi());
+    Serial.print(",");
+    Serial.println(pid.GetKd());
+
+    computePrediction();
+    tk1Predict = tk1 + predictTemperature;
+
+    if (tk1 > MAX_TEMEPRATURE || tk2 > MAX_TEMEPRATURE || tk3 > MAX_TEMEPRATURE) {
+        turnOffController();
+    }
+}
+
+double readTemperatureADS1115Samo(const int pin) {
+    int16_t adc0;  // we read from the ADC, we have a sixteen bit integer as a result
+
+    adc0 = ads.readADC_SingleEnded(pin);
+    double voltage = (adc0 * 0.1875) / 1000.0;
+    double temperature = 125.7 * voltage - 123.1;
+    return temperature;
+}
+
+double readTemperatureADS1115(const int externalModulAnalogPin) {
+    int16_t adc0;  // we read from the ADC, we have a sixteen bit integer as a result
+
+    adc0 = ads.readADC_SingleEnded(externalModulAnalogPin);
+    double voltage = (adc0 * 0.1875) / 1000.0;
+    double temperature = voltage / 0.005;
+    return temperature;
+}
+
+void printWithTab(double d) {
+    Serial.print(d);
+    Serial.print("\t");
 }
 
 void setupSerial() {
@@ -185,8 +297,9 @@ void setupEthernet() {
 }
 
 void controlProcess() {
-    Input = tk1;
+    Input = tk1Predict;
     pid.Compute();
+
     /************************************************
      * turn the output pin on/off based on pid output
      ************************************************/
@@ -201,14 +314,32 @@ void controlProcess() {
     }
 }
 
+long predictionSum = 0;
+
+void computePrediction() {
+    //calculate value after delay
+    // for 50 C 5s -> 2.88 C
+    // PidOutput * 2.88 / 5.0
+    if (Output == minOutput) {
+        predictTemperature = 0;
+    }
+    predictTemperature += (Output * 0.4 / 1000.0);
+    Serial.print("Actual temperature tk1: ");
+    Serial.print(tk1, 4);
+    Serial.print(" Predict temeperature: ");
+    Serial.print(tk1 + predictTemperature);
+    Serial.print(" For Pid output[ms]: ");
+    Serial.println(Output);
+}
+
 void handleRelayOutput() {
     if (millis() - windowStartTime >= WindowSize) { //time to shift the Relay Window
         windowStartTime += WindowSize;
     }
     if (Output > millis() - windowStartTime) {
-        setupOutputs(HIGH);
+        PORTD = PORTD | B00000000;
     } else {
-        setupOutputs(LOW);
+        PORTD = PORTD & B10001111;
     }
 }
 
@@ -221,17 +352,17 @@ void handleRequest() {
         JsonObject &requestFromClientJson = jsonBuffer.parseObject(requestFromClient);
 
         if (requestFromClientJson.success()) {
-            int32_t tempPower = requestFromClientJson["power"];
-            if (tempPower <= 100 && tempPower >= 0) {
-                Serial.print("Power from client change to: ");
-                power = tempPower;
+            int32_t tempSetpoint = requestFromClientJson["setPoint"];
+            if (tempSetpoint <= 100 && tempSetpoint >= 0) {
+                Serial.print("Set point from client change to: ");
+                Serial.println(tempSetpoint);
+                setPoint = tempSetpoint;
             }
         } else {
             Serial.print("Power from client will not be change can't parse request ");
         }
 
         requestFromClient = "";
-        Serial.println(power);
         isRequestCompleted = false;
     }
 }
@@ -260,6 +391,7 @@ void processRequest(const char *pch1) {
         Serial.println(val);
         if (strstr(keyname, "setPoint") != NULL) {
             setPoint = atof(val);
+            setupMinOutput();
         } else if (strstr(keyname, "kp") != NULL) {
             kp = atof(val);
         } else if (strstr(keyname, "kd") != NULL) {
@@ -271,6 +403,24 @@ void processRequest(const char *pch1) {
         }
         pch = strtok(NULL, "&");
     }
+}
+
+void setupMinOutput() {
+
+    if (setPoint >= 330) {
+        minOutput = 350;
+    } else if (setPoint >= 300) {
+        minOutput = 300;
+    } else if (setPoint >= 250) {
+        minOutput = 300;
+    } else if (setPoint >= 200) {
+        minOutput = 200;
+    } else if (setPoint >= 150) {
+        minOutput = 100;
+    } else {
+        minOutput = 0;
+    }
+    pid.SetOutputLimits(minOutput, maxPowerInterval);
 }
 
 template<typename Type>
@@ -333,6 +483,8 @@ void handleEthernet() {
                     if (pch != NULL && (pch[4] == '?' || pch[4] == ' ')) {
                         // handle request
                         processRequest(pch);
+                        //setup pid constants
+                        pid.SetTunings(kp, ki, kd);
                         // print response
                         clientPrintApplicationJsonHeader(client);
                         client.println();
@@ -373,7 +525,8 @@ void handleEthernet() {
         // close the connection:
         client.stop();
         // if no client is online it will be restarted
-        wdt_reset();
+        protectionCounter++;
+        isClientOnline = true;
     }
 }
 
@@ -453,27 +606,75 @@ void handleComunication() {
 
 void turnOffController() {
     pid.SetMode(MANUAL);
-    setupOutputs(LOW);
+    PORTD = PORTD & B10001111;
     power = 0;
+}
+
+void turnOnController() {
+    PORTD = PORTD | B01110000;
 }
 
 void setup() {
     //setup watchdog
+    pinMode(CONTROLLINO_PIN_HEADER_DIGITAL_OUT_08, Output);
+    digitalWrite(CONTROLLINO_PIN_HEADER_DIGITAL_OUT_08, HIGH);
+    delay(2000);
+    digitalWrite(CONTROLLINO_PIN_HEADER_DIGITAL_OUT_08, LOW);
+
     wdt_enable(WDTO_8S);
     setupSerial();
     setupEthernet();
     setupPid();
     //timer setup
     setupHwTimer();
-    measurmentTimer.every(CONTROLLER_ACTION_INTERVAL, measureTemperatures);
-    int pinMode = 2;
-    setupOutputs(pinMode);
-    setupOutputs(LOW);
+    setupADS1115();
+    protectionTimer.every(SECURITY_PROTECTION_INTERVAL, securityEvaluation);
+    measurmentTimer.every(MEASURING_TEMPERATURE_INTERVAL, measureTemperatures);
+    DDRD = DDRD | B01110000; // set D20 D21 D22 controllino Digital pins as output, on mega board PCB
+}
+
+void setupADS1115() {
+    ads.begin();
 }
 
 boolean prevIsActive = false;
 
 void loop() {
+    boolean isControllProcess = true;
+    if (isControllProcess) {
+        controllProcess();
+    } else {
+        analyzeProcess();
+    }
+}
+
+void analyzeProcess() {
+    unsigned long waitForActionDelay = 5000;
+    long setPoint = 100;
+    double tk1 = readTemperatureADS1115(TK_1_PIN);
+    Serial.println("Start analyze process");
+    Serial.println("Start temperature:");
+    Serial.println(tk1, 4);
+    Serial.print("Turn on the actuator and wait: ");
+    Serial.print(waitForActionDelay);
+    turnOnController();
+    delay(waitForActionDelay);
+    turnOffController();
+    Serial.println("Waiting for temperature start to decrease");
+    long prevTemperature = 0;
+    int counterSeconds = 0;
+    while (true) {
+        wdt_reset();
+        tk1 = readTemperatureADS1115(TK_1_PIN);
+        Serial.println(tk1, 4);
+        Serial.print("seconds: ");
+        Serial.println(counterSeconds);
+        delay(1000);
+        counterSeconds++;
+    }
+}
+
+void controllProcess() {
     handleComunication();
     //Measure process values
     measurmentTimer.update();
@@ -483,9 +684,70 @@ void loop() {
             Serial.println("Setting automatic mode");
             pid.SetMode(AUTOMATIC);
         }
+        if (isPidInAutomaticMode) {
+            adaptPidParamters();
+        }
         controlProcess();
     } else {
         turnOffController();
+    }
+
+    if (isClientOnline) {
+        wdt_reset();
+    }
+    //Security checks
+    protectionTimer.update();
+}
+
+void changePidParamters(int parameterRange) {
+    switch (parameterRange) {
+        case 1:
+            kp = (setPoint / 150.000) * 13;
+            ki = (setPoint / 150.000) * 35;
+            minOutput = (setPoint / 150.000) * 16;
+            break;
+        case 2:
+            kp = (setPoint / 150.000) * 20;
+            ki = (setPoint / 150.000) * 55;
+            minOutput = (setPoint / 150.000) * 16;
+            break;
+        case 3:
+            kp = (setPoint / 200.000) * 23;
+            ki = (setPoint / 200.000) * 80;
+            minOutput = (setPoint / 200.000) * 16;
+            break;
+        case 4:
+            kp = (setPoint / 200.000) * 21;
+            ki = ((setPoint / 200.000) * 80) - 40.00;
+            minOutput = (setPoint / 200.000) * 17;
+            break;
+        case 5:
+            kp = (setPoint / 200.000) * 22;
+            ki = ((setPoint / 200.000) * 80) - 40.00;
+            minOutput = (setPoint / 200.000) * 19;
+            break;
+        case -1:
+            kp = 3.8150;
+            ki = 38.2546;
+            minOutput = (setPoint / 150) * 16;
+            break;
+    }
+    pid.SetOutputLimits(minOutput, maxPowerInterval);
+}
+
+void adaptPidParamters() {
+    if (setPoint >= 0 && setPoint < 100) {
+        changePidParamters(1);
+    } else if (setPoint >= 100 && setPoint <= 150) {
+        changePidParamters(2);
+    } else if (setPoint > 150 && setPoint < 200) {
+        changePidParamters(3);
+    } else if (setPoint >= 200 && setPoint <= 329) {
+        changePidParamters(4);
+    } else if (setPoint > 330 && setPoint <= 350) {
+        changePidParamters(5);
+    } else {
+        changePidParamters(-1);
     }
 }
 
